@@ -6,13 +6,13 @@ using System.Text;
 using System.Data;
 using System.ComponentModel;
 using Terraria;
-using Hooks;
 using TShockAPI;
 using TShockAPI.DB;
 using Mono.Data.Sqlite;
 using MySql.Data.MySqlClient;
 using Newtonsoft.Json;
 using System.Threading;
+using TerrariaApi.Server;
 
 namespace AdminTools
 {
@@ -63,7 +63,7 @@ namespace AdminTools
             }
         }
     }
-    [APIVersion(1, 12)]
+    [ApiVersion(1, 16)]
     public class AdminToolsMain : TerrariaPlugin
     {
         public static IDbConnection db;
@@ -72,8 +72,6 @@ namespace AdminTools
         private static string savepath = Path.Combine(TShock.SavePath, "AdminTools/");
         public static List<ATPlayer> PlayerList = new List<ATPlayer>();
         
-
-
         public override string Name
         {
             get { return "AdminTools"; }
@@ -97,9 +95,9 @@ namespace AdminTools
         }
         public override void Initialize()
         {
-            NetHooks.GetData += GetData;
-            ServerHooks.Leave += OnLeave;
-            TShockAPI.Hooks.PlayerHooks.PlayerLogin += OnLogin;
+            ServerApi.Hooks.NetGetData.Register(this, GetData);
+	        ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
+            TShockAPI.Hooks.PlayerHooks.PlayerPostLogin += OnLogin;
             //GameHooks.Update += OnUpdate;
             //NetHooks.SendData += SendData;
           //  Commands.ChatCommands.Add(new Command("permission", CommandMethod, "command"));
@@ -115,9 +113,9 @@ namespace AdminTools
         {
             if (disposing)
             {
-                NetHooks.GetData -= GetData;
-                ServerHooks.Leave -= OnLeave;
-                TShockAPI.Hooks.PlayerHooks.PlayerLogin -= OnLogin;
+				ServerApi.Hooks.NetGetData.Deregister(this, GetData);
+				ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
+				TShockAPI.Hooks.PlayerHooks.PlayerPostLogin -= OnLogin;
                 //GameHooks.Update -= OnUpdate;
                 //NetHooks.SendData -= SendData;
             }
@@ -178,8 +176,9 @@ namespace AdminTools
             SQLcreator.EnsureExists(table);
 
         }
-        private static void OnLeave(int who)
+        private static void OnLeave(LeaveEventArgs args)
         {
+	        int who = args.Who;
             try
             {
                 var player = GetPlayerByIndex(who);
@@ -201,7 +200,7 @@ namespace AdminTools
             }
         }
 
-        private void OnLogin(TShockAPI.Hooks.PlayerLoginEventArgs args)
+        private void OnLogin(TShockAPI.Hooks.PlayerPostLoginEventArgs args)
         {
             var player = GetPlayerByUserID(args.Player.UserID);
 
