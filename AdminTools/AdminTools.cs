@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Data;
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using Terraria;
 using TShockAPI;
 using TShockAPI.DB;
@@ -18,7 +19,6 @@ namespace AdminTools
 {
     public class ATPlayer
     {
-        public int Index;
         public int UserID = -1;
         public String AccountName = "";
         public List<String> IP = new List<string>();
@@ -26,9 +26,8 @@ namespace AdminTools
         public DateTime LastSeen = DateTime.Now;
         public bool Online =  false;
         public List<BindTool> BindTools = new List<BindTool>();
-        public ATPlayer(int index)
+        public ATPlayer()
         {
-            this.Index = index;
         }
         public void AddBindTool(BindTool NewBT)
         {
@@ -63,14 +62,14 @@ namespace AdminTools
             }
         }
     }
-    [ApiVersion(1, 16)]
+    [ApiVersion(1, 17)]
     public class AdminToolsMain : TerrariaPlugin
     {
         public static IDbConnection db;
         public static SqlTableCreator SQLcreator;
         public static SqlTableEditor SQLeditor;
         private static string savepath = Path.Combine(TShock.SavePath, "AdminTools/");
-        public static List<ATPlayer> PlayerList = new List<ATPlayer>();
+        public static ATPlayer[] ATPlayers = new ATPlayer[255];
         
         public override string Name
         {
@@ -86,7 +85,7 @@ namespace AdminTools
         }
         public override Version Version
         {
-            get { return new Version("0.1"); }
+            get { return new Version("1.1"); }
         }
         public AdminToolsMain(Main game)
             : base(game)
@@ -95,9 +94,11 @@ namespace AdminTools
         }
         public override void Initialize()
         {
-            ServerApi.Hooks.NetGetData.Register(this, GetData);
-	        ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
+            ServerApi.Hooks.NetGetData.Register(this, GetData, -1);
+			ServerApi.Hooks.ServerLeave.Register(this, OnLeave, -1);
+			ServerApi.Hooks.ServerJoin.Register(this, OnJoin);
             TShockAPI.Hooks.PlayerHooks.PlayerPostLogin += OnLogin;
+	        TShockAPI.GetDataHandlers.PlayerUpdate += OnPlayerUpdate;
             //GameHooks.Update += OnUpdate;
             //NetHooks.SendData += SendData;
           //  Commands.ChatCommands.Add(new Command("permission", CommandMethod, "command"));
@@ -116,8 +117,9 @@ namespace AdminTools
 				ServerApi.Hooks.NetGetData.Deregister(this, GetData);
 				ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
 				TShockAPI.Hooks.PlayerHooks.PlayerPostLogin -= OnLogin;
-                //GameHooks.Update -= OnUpdate;
-                //NetHooks.SendData -= SendData;
+				TShockAPI.GetDataHandlers.PlayerUpdate -= OnPlayerUpdate;
+	            //GameHooks.Update -= OnUpdate;
+	            //NetHooks.SendData -= SendData;
             }
             base.Dispose(disposing);
         }
@@ -173,24 +175,24 @@ namespace AdminTools
                 new SqlColumn("IPs", MySql.Data.MySqlClient.MySqlDbType.Text),
                 new SqlColumn("LastSeen", MySql.Data.MySqlClient.MySqlDbType.Int32)
             );
-            SQLcreator.EnsureExists(table);
-
+	        SQLcreator.EnsureTableStructure(table);
         }
+
+	    private void OnJoin(JoinEventArgs args)
+	    {
+		    ATPlayers[args.Who] = new ATPlayer();
+	    }
+
         private static void OnLeave(LeaveEventArgs args)
         {
-	        int who = args.Who;
             try
             {
-                var player = GetPlayerByIndex(who);
+	            var player = ATPlayers[args.Who];
                 if (player != null)
                 {
                     if (player.UserID != -1)
                     {
                         AdminToolsMain.db.QueryReader("UPDATE PlayerData SET Nicknames=@1, IPs=@2, LastSeen=@3 WHERE UserID=@0", player.UserID, JsonConvert.SerializeObject(player.Nicknames, Formatting.None), JsonConvert.SerializeObject(player.IP, Formatting.None), DateTime.Now.Ticks);
-                    }
-                    lock (PlayerList)
-                    {
-                        PlayerList.Remove(player);
                     }
                 }
             }
@@ -202,74 +204,96 @@ namespace AdminTools
 
         private void OnLogin(TShockAPI.Hooks.PlayerPostLoginEventArgs args)
         {
-            var player = GetPlayerByUserID(args.Player.UserID);
+			var player = ATPlayers[args.Player.Index];
+	        player.UserID = args.Player.UserID;
+			try
+			{
+				//if (RolePlay.debugInfo) Console.WriteLine("--- > UserID: {0}", this.RPlayer.TSPlayer.UserID);                  
+				if (player != null && player.UserID != -1)
+				{
+					QueryResult reader = AdminToolsMain.db.QueryReader("SELECT * from PlayerData WHERE UserID=@0", player.UserID);
+					List<String> IP;
+					List<String> Nicknames;
+					if (reader.Read())
+					{
+						Console.WriteLine("Found player data for {0}", args.Player.Name);
+						IP = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("IPs"));
+						Nicknames = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("Nicknames"));
+					}
+					else
+					{
+						IP = new List<string>();
+						Nicknames = new List<string>();
+						IP.Add(args.Player.IP);
+						if (args.Player.UserAccountName != args.Player.Name)
+							Nicknames.Add(args.Player.Name);
+						AdminToolsMain.db.QueryReader("INSERT INTO PlayerData (UserID, Username, Nicknames, IPs, LastSeen) VALUES (@0, @1, @2, @3, @4)", player.UserID, args.Player.UserAccountName, JsonConvert.SerializeObject(Nicknames, Formatting.None), JsonConvert.SerializeObject(IP, Formatting.None), DateTime.Now.Ticks);
+					}
+					reader.Dispose();
+					if (!IP.Contains(args.Player.IP))
+					{
+						IP.Add(args.Player.IP);
+					}
+					else if (args.Player.UserAccountName != args.Player.Name && !Nicknames.Contains(args.Player.Name))
+					{
+						Nicknames.Add(args.Player.Name);
+					}
 
-            if (player != null)
+					player.UserID = player.UserID;
+					player.AccountName = args.Player.UserAccountName;
+					player.Nicknames = Nicknames;
+					player.IP = IP;
+					player.Online = true;
+
+				}
+			}
+			catch (Exception e)
+			{
+				Log.ConsoleError(e.Message);
+				return;
+			}
+
+            try
             {
-                try
-                {
-                    AdminToolsMain.db.QueryReader(
-                        "UPDATE PlayerData SET Nicknames=@1, IPs=@2, LastSeen=@3 WHERE UserID=@0", player.UserID,
-                        JsonConvert.SerializeObject(player.Nicknames, Formatting.None),
-                        JsonConvert.SerializeObject(player.IP, Formatting.None), DateTime.Now.Ticks);
-
-                    lock (PlayerList)
-                    {
-                        PlayerList.Remove(player);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.ConsoleError(ex.ToString());
-                }
+                AdminToolsMain.db.QueryReader(
+                    "UPDATE PlayerData SET Nicknames=@1, IPs=@2, LastSeen=@3 WHERE UserID=@0", player.UserID,
+                    JsonConvert.SerializeObject(player.Nicknames, Formatting.None),
+                    JsonConvert.SerializeObject(player.IP, Formatting.None), DateTime.Now.Ticks);
             }
-
-            new Thread(new ThreadStart(new LoginThread(args.Player.TPlayer.whoAmi).CheckLogin)).Start();
+            catch (Exception ex)
+            {
+                Log.ConsoleError(ex.ToString());
+            }
         }
 
         #region Getdata
         public static void GetData(GetDataEventArgs e)
         {
-            if (e.Handled)
-                return;
+	        if (e.Handled)
+		        return;
+
             try
             {
                 switch (e.MsgID)
                 {
-                    #region player join
-                    case PacketTypes.TileGetSection:
-                        {
-                            if (!TShock.Players[e.Msg.whoAmI].RequestedSection)
-                            {
-                                lock (PlayerList)
-                                {
-                                    PlayerList.Add(new ATPlayer(e.Msg.whoAmI));
-                                }
-                                LoginThread lt = new LoginThread(e.Msg.whoAmI);
-                                Thread t = new Thread(new ThreadStart(lt.CheckLogin));
-                                t.Start();
-                            }
-                            break;
-                        }
-                    #endregion
                     #region Tile Edit
                     case PacketTypes.Tile:
                         {
-                            byte type, tileType, style;
-                            Int32 x, y;
-                            bool fail;
-                            using (var data = new MemoryStream(e.Msg.readBuffer, e.Index, e.Length))
+                            byte type, varData2;
+                            Int16 x, y, varData;
+
+							using (var data = new MemoryStream(e.Msg.readBuffer, e.Index, e.Length - 1))
                             {
-                                var reader = new BinaryReader(data);
-                                type = reader.ReadByte();
-                                x = reader.ReadInt32();
-                                y = reader.ReadInt32();
-                                tileType = reader.ReadByte();
-                                fail = reader.ReadBoolean();
-                                style = reader.ReadByte();
-                                reader.Close();
-                                reader.Dispose();
+	                            using (var reader = new BinaryReader(data))
+	                            {
+		                            type = reader.ReadByte();
+		                            x = reader.ReadInt16();
+		                            y = reader.ReadInt16();
+		                            varData = reader.ReadInt16();
+		                            varData2 = reader.ReadByte();
+	                            }
                             }
+
                             int signID = Sign.ReadSign(x, y);
                             //Console.WriteLine("TileEdit: type: {0}, tiletype: {1}, fail: {2}, style: {3}, tile.frameX: {4}", type, tileType, fail, style, Main.tile[x, y].frameX);
                             //  Tile tile = Main.tile[x, y];
@@ -279,16 +303,10 @@ namespace AdminTools
                             #region Tile Remove
                             if (type == 0 || type == 4)
                             {
-                                if (tileType == 0 && signID != -1)
+                                if (Main.tile[x, y].type == Terraria.ID.TileID.Signs && signID != -1)
                                 {
                                     db.QueryReader("DELETE FROM SignData WHERE X=@0 AND Y=@1 AND WorldID=@2", x, y, Main.worldID);
                                 }
-                            }
-                            #endregion
-                            #region Tile place
-                            else if (type == 1)
-                            {
-
                             }
                             #endregion
                             break;
@@ -298,19 +316,18 @@ namespace AdminTools
                     case PacketTypes.SignNew:
                         {
                             Int16 signId;
-                            Int32 x, y;
-                            byte[] textB;
-                            using (var data = new MemoryStream(e.Msg.readBuffer, e.Index, e.Length))
+                            Int16 x, y;
+                            string textB;
+                            using (var data = new MemoryStream(e.Msg.readBuffer, e.Index, e.Length - 1))
                             {
-                                var reader = new BinaryReader(data);
-                                signId = reader.ReadInt16();
-                                x = reader.ReadInt32();
-                                y = reader.ReadInt32();
-                                textB = reader.ReadBytes(e.Length - 10);
-                                reader.Close();
-                                reader.Dispose();
+	                            using (var reader = new BinaryReader(data))
+	                            {
+		                            signId = reader.ReadInt16();
+		                            x = reader.ReadInt16();
+		                            y = reader.ReadInt16();
+		                            textB = reader.ReadString();
+	                            }
                             }
-                            string newtxt = Encoding.UTF8.GetString(textB);
                             var tplayer = TShock.Players[e.Msg.whoAmI];
                             int id = Sign.ReadSign(x, y);
                             if (id != -1)
@@ -370,50 +387,6 @@ namespace AdminTools
                             break;
                         }
                     #endregion
-                    #region Player Update
-                    case PacketTypes.PlayerUpdate:
-                        {
-                            using (var data = new MemoryStream(e.Msg.readBuffer, e.Index, e.Length))
-                            {
-                                var reader = new BinaryReader(data);
-                                byte plyID = reader.ReadByte();
-                                byte flags = reader.ReadByte();
-                                byte item = reader.ReadByte();
-                                float posX = reader.ReadSingle();
-                                float posY = reader.ReadSingle();
-                                float velX = reader.ReadSingle();
-                                float velY = reader.ReadSingle();
-                                reader.Close();
-                                reader.Dispose();
-                                //Console.WriteLine("PlayerUpdate: playerID: {0}, item: {1}, posX: {2}, posY: {3}, velX: {4}, velY: {5}", plyID, item, posX, posY, velX, velY);
-                                //Console.WriteLine("item info: Name: {0}, dmg: {1}, animation: {2}", Main.player[plyID].inventory[item].name, Main.player[plyID].inventory[item].damage, Main.player[plyID].inventory[item].useAnimation);
-                                TSPlayer tsplayer = TShock.Players[plyID];
-                                if (tsplayer == null)
-                                    break;
-                                ATPlayer player = GetPlayerByUserID(tsplayer.UserID);
-                                if (player == null)
-                                    break;
-                                // Console.WriteLine("Flags: {0}", flags);
-                                if ((flags & 32) == 32)
-                                {
-                                    try
-                                    {
-                                        var BT = player.GetBindTool(Main.player[plyID].inventory[item]);
-                                        if (BT != null)
-                                        {
-                                            BT.DoCommand(tsplayer);
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Log.ConsoleError(ex.ToString());
-                                    }
-                                    //Console.WriteLine("Player {0} used item: {1}", player.TSPlayer.Name, Main.player[plyID].inventory[item].name);
-                                }
-                            }
-                            break;
-                        }
-                    #endregion
                 }
             }
             catch (Exception ex)
@@ -422,6 +395,34 @@ namespace AdminTools
             }
         }
         #endregion
+
+		private void OnPlayerUpdate(object sender, GetDataHandlers.PlayerUpdateEventArgs args)
+	    {
+		    TSPlayer tsplayer = TShock.Players[args.PlayerId];
+		    if (tsplayer == null)
+			    return;
+			ATPlayer player = ATPlayers[args.PlayerId];
+			if (player == null)
+				return;
+			// Console.WriteLine("Flags: {0}", flags);
+			if ((args.Control & 32) == 32)
+			{
+				try
+				{
+					var BT = player.GetBindTool(Main.player[args.PlayerId].inventory[args.Item]);
+					if (BT != null)
+					{
+						BT.DoCommand(tsplayer);
+					}
+				}
+				catch (Exception ex)
+				{
+					Log.ConsoleError(ex.ToString());
+				}
+				//Console.WriteLine("Player {0} used item: {1}", player.TSPlayer.Name, Main.player[plyID].inventory[item].name);
+			}
+	    }
+
         private void Whois(CommandArgs args)
         {
             if (args.Parameters.Count > 0)
@@ -530,32 +531,20 @@ namespace AdminTools
             args.Player.SendMessage("-u  UserID search", Color.LightSalmon);
             args.Player.SendMessage("-i  IP address search", Color.LightSalmon);
         }
-        private static ATPlayer GetPlayerByUserID(int id)
-        {
-            lock (PlayerList)
-            {
-                foreach (ATPlayer player in PlayerList)
-                    if (player.UserID == id)
-                        return player;
-            }
-            return null;
-        }        
+    
         private static List<ATPlayer> SearchPlayerByName(string name, bool exact = false)
         {
             List<ATPlayer> ReturnList = new List<ATPlayer>();
-            lock (PlayerList)
+            foreach (ATPlayer player in ATPlayers.Where(p => p != null))
             {
-                foreach (ATPlayer player in PlayerList)
+                if ((exact && player.AccountName == name) || (!exact && player.AccountName.ToLower().StartsWith(name.ToLower())))
+                    ReturnList.Add(player);
+                else
                 {
-                    if ((exact && player.AccountName == name) || (!exact && player.AccountName.ToLower().StartsWith(name.ToLower())))
-                        ReturnList.Add(player);
-                    else
+                    foreach (string nick in player.Nicknames)
                     {
-                        foreach (string nick in player.Nicknames)
-                        {
-                            if ((exact && nick == name) || (!exact && nick.ToLower().StartsWith(name.ToLower())))
-                                ReturnList.Add(player);
-                        }
+                        if ((exact && nick == name) || (!exact && nick.ToLower().StartsWith(name.ToLower())))
+                            ReturnList.Add(player);
                     }
                 }
             }
@@ -578,7 +567,7 @@ namespace AdminTools
                 }
                 if (!found)
                 {
-                    ATPlayer newplayer = new ATPlayer(-1);
+                    ATPlayer newplayer = new ATPlayer();
                     newplayer.UserID = reader.Get<int>("UserID");
                     newplayer.AccountName = reader.Get<String>("Username");
                     newplayer.Nicknames = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("Nicknames"));
@@ -593,13 +582,10 @@ namespace AdminTools
         private static List<ATPlayer> SearchPlayerByUserID(int userid)
         {
             List<ATPlayer> ReturnList = new List<ATPlayer>();
-            lock (PlayerList)
+            foreach (TSPlayer player in TShock.Players.Where(p => p != null && p.Active))
             {
-                foreach (ATPlayer player in PlayerList)
-                {
-                    if (player.UserID == userid)
-                        ReturnList.Add(player);
-                }
+                if (player.UserID == userid)
+                    ReturnList.Add(ATPlayers[player.Index]);
             }
             QueryResult reader = AdminToolsMain.db.QueryReader("SELECT * from PlayerData WHERE UserID = @0", userid);
             while (reader.Reader.Read())
@@ -615,7 +601,7 @@ namespace AdminTools
                 }
                 if (!found)
                 {
-                    ATPlayer newplayer = new ATPlayer(-1);
+                    ATPlayer newplayer = new ATPlayer();
                     newplayer.UserID = reader.Get<int>("UserID");
                     newplayer.AccountName = reader.Get<String>("Username");
                     newplayer.Nicknames = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("Nicknames"));
@@ -629,15 +615,12 @@ namespace AdminTools
         private static List<ATPlayer> SearchPlayerByIP(string ip)
         {
             List<ATPlayer> ReturnList = new List<ATPlayer>();
-            lock (PlayerList)
+            foreach (ATPlayer player in ATPlayers.Where(player => player != null))
             {
-                foreach (ATPlayer player in PlayerList)
+                foreach (string i in player.IP)
                 {
-                    foreach (string i in player.IP)
-                    {
-                        if (i == ip)
-                            ReturnList.Add(player);
-                    }
+                    if (i == ip)
+                        ReturnList.Add(player);
                 }
             }
             string query = String.Format("SELECT * from PlayerData WHERE IPs LIKE '%\"{0}\"%'", ip);
@@ -655,7 +638,7 @@ namespace AdminTools
                 }
                 if (!found)
                 {
-                    ATPlayer newplayer = new ATPlayer(-1);
+                    ATPlayer newplayer = new ATPlayer();
                     newplayer.UserID = reader.Get<int>("UserID");
                     newplayer.AccountName = reader.Get<String>("Username");
                     newplayer.Nicknames = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("Nicknames"));
@@ -670,7 +653,7 @@ namespace AdminTools
 
         private static void BindToolCMD(CommandArgs args)
         {
-            var player = GetPlayerByUserID(args.Player.UserID);
+	        var player = ATPlayers[args.Player.Index];
             if (player == null)
                 return;
             if (args.Parameters.Count > 0)
@@ -732,85 +715,5 @@ namespace AdminTools
             args.Player.SendMessage("-l Will loop trough commands in order", Color.BurlyWood);
             args.Player.SendMessage("-c Will clear all commands from the item", Color.BurlyWood);
         }
-        public static ATPlayer GetPlayerByIndex(int index)
-        {
-            lock (PlayerList)
-            {
-                foreach (ATPlayer player in PlayerList)
-                {
-                    if (player.Index == index)
-                        return player;
-                }
-            }
-            return null;
-        }
     }
-
-
-
-    public class LoginThread
-    {
-        private int Index;
-        public LoginThread(int index)
-        {
-            this.Index = index;
-        }
-        public void CheckLogin()
-        {
-            System.Threading.Thread.Sleep(3000);
-            try
-            {
-                TSPlayer player = TShock.Players[this.Index];
-                //if (RolePlay.debugInfo) Console.WriteLine("--- > UserID: {0}", this.RPlayer.TSPlayer.UserID);                  
-                if (player != null && player.UserID != -1)
-                {
-                    QueryResult reader = AdminToolsMain.db.QueryReader("SELECT * from PlayerData WHERE UserID=@0", player.UserID);
-                    List<String> IP;
-                    List<String> Nicknames;
-                    if (reader.Read())
-                    {
-                        Console.WriteLine("Found player data for {0}", player.Name);
-                        IP = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("IPs"));
-                        Nicknames = JsonConvert.DeserializeObject<List<String>>(reader.Get<String>("Nicknames"));
-                    }
-                    else
-                    {
-                        IP = new List<string>();
-                        Nicknames = new List<string>();
-                        IP.Add(player.IP);
-                        if (player.UserAccountName != player.Name)
-                            Nicknames.Add(player.Name);
-                        AdminToolsMain.db.QueryReader("INSERT INTO PlayerData (UserID, Username, Nicknames, IPs, LastSeen) VALUES (@0, @1, @2, @3, @4)", player.UserID, player.UserAccountName, JsonConvert.SerializeObject(Nicknames, Formatting.None), JsonConvert.SerializeObject(IP, Formatting.None), DateTime.Now.Ticks);
-                    }
-                    reader.Dispose();
-                    if (!IP.Contains(player.IP))
-                    {
-                        IP.Add(player.IP);
-                    }
-                    else if (player.UserAccountName != player.Name && !Nicknames.Contains(player.Name))
-                    {
-                        Nicknames.Add(player.Name);
-                    }
-                    ATPlayer atplayer = AdminToolsMain.GetPlayerByIndex(this.Index);
-                    if (atplayer != null)
-                    {
-                        lock (AdminToolsMain.PlayerList)
-                        {
-                            atplayer.UserID = player.UserID;
-                            atplayer.AccountName = player.UserAccountName;
-                            atplayer.Nicknames = Nicknames;
-                            atplayer.IP = IP;
-                            atplayer.Online = true;
-                        }
-                    }
-
-                }
-            }
-            catch (Exception e)
-            {
-                Log.ConsoleError(e.Message);
-            }
-        }
-    }
-
 }
